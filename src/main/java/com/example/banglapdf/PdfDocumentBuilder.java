@@ -86,9 +86,16 @@ final class PdfDocumentBuilder {
                 PDPage pdPage = new PDPage(mediaBox);
                 document.addPage(pdPage);
                 try (PDPageContentStream stream = new PDPageContentStream(document, pdPage)) {
+                    // Table grid lines are path-stroking operators and must sit
+                    // outside the text object; order relative to the text
+                    // itself does not matter since the two never overlap.
+                    String rules = content.buildRules(page);
+                    if (!rules.isEmpty()) {
+                        stream.appendRawCommands(rules);
+                    }
                     stream.beginText();
                     stream.setFont(font, style.fontSize());
-                    stream.appendRawCommands(content.build(page));
+                    stream.appendRawCommands(content.buildText(page));
                     stream.endText();
                 }
             }

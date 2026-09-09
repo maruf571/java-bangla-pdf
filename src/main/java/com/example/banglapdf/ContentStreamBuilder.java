@@ -4,6 +4,7 @@ import java.util.List;
 
 import com.example.banglapdf.TextLayout.Line;
 import com.example.banglapdf.TextLayout.Page;
+import com.example.banglapdf.TextLayout.Rule;
 import com.example.banglapdf.TextShaper.Cluster;
 import com.example.banglapdf.TextShaper.ShapedGlyph;
 import com.example.banglapdf.TextShaper.ShapedText;
@@ -39,6 +40,10 @@ import com.example.banglapdf.TextShaper.ShapedText;
  *       every glyph that maps to a character on its own; ActualText covers
  *       what that cannot -- the drawing order.)
  * </ul>
+ *
+ * <p>A table's grid lines are a separate concern, built by {@link #buildRules}
+ * as plain path-stroking operators (there is no text involved), and run before
+ * the page's text object rather than inside it.
  */
 final class ContentStreamBuilder {
 
@@ -51,7 +56,7 @@ final class ContentStreamBuilder {
     }
 
     /** The text-showing operators for one page, to run inside PDFBox's BT/Tf/ET. */
-    String build(Page page) {
+    String buildText(Page page) {
         StringBuilder out = new StringBuilder(4096);
         for (Line line : page.lines()) {
             if (line.text().isEmpty()) {
@@ -62,6 +67,26 @@ final class ContentStreamBuilder {
             out.append("1 0 0 1 ").append(PdfSyntax.number(line.x())).append(' ')
                     .append(PdfSyntax.number(line.baseline())).append(" Tm\n");
             appendLine(out, line.text());
+        }
+        return out.toString();
+    }
+
+    /**
+     * The stroke operators for one page's table grid lines, to run outside any
+     * text object -- path-painting operators are not legal between {@code BT}
+     * and {@code ET}. Returns an empty string for a page with no tables, so
+     * callers can skip emitting it.
+     */
+    String buildRules(Page page) {
+        if (page.rules().isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(256);
+        out.append("0.75 w 0 0 0 RG\n");
+        for (Rule rule : page.rules()) {
+            out.append(PdfSyntax.number(rule.x1())).append(' ').append(PdfSyntax.number(rule.y1())).append(" m ")
+                    .append(PdfSyntax.number(rule.x2())).append(' ').append(PdfSyntax.number(rule.y2()))
+                    .append(" l S\n");
         }
         return out.toString();
     }

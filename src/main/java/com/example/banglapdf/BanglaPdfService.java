@@ -36,6 +36,10 @@ import com.example.banglapdf.TextLayout.Page;
  *    .write(paragraphs, Path.of("report.pdf"));
  * }</pre>
  *
+ * <p>For a document that needs a real table -- an invoice's line items, a
+ * price list -- {@link #write(Document, Path)} takes a {@link Document} of
+ * {@link DocumentPart}s (prose and tables, in order) instead of paragraphs.
+ *
  * <p>Instances hold native memory. Close the service when you are done with it;
  * derived instances share the parent's font, so closing any one of them closes
  * them all. Instances are not thread-safe.
@@ -138,6 +142,35 @@ public final class BanglaPdfService implements AutoCloseable {
     }
 
     /**
+     * Renders a {@link Document} -- prose and tables, in order -- and writes it
+     * to {@code destination}. Use this instead of {@link #write(String, Path)}
+     * when the content needs a table: an itemised invoice, a price list,
+     * anything with columns that need to actually line up, which plain
+     * left-aligned paragraphs cannot express.
+     *
+     * @return the number of pages written
+     */
+    public int write(Document document, Path destination) {
+        Objects.requireNonNull(destination, "destination");
+        Rendered rendered = renderDocument(document);
+        try {
+            Path parent = destination.toAbsolutePath().getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Files.write(destination, rendered.bytes());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not write the PDF to " + destination, e);
+        }
+        return rendered.pageCount();
+    }
+
+    /** Renders a {@link Document} and returns the PDF bytes instead of writing a file. */
+    public byte[] toBytes(Document document) {
+        return renderDocument(document).bytes();
+    }
+
+    /**
      * Reports characters the font has no glyph for. Worth calling before
      * shipping a document: a missing glyph is drawn as a blank or a box, and
      * nothing else in the pipeline will complain about it.
@@ -157,7 +190,17 @@ public final class BanglaPdfService implements AutoCloseable {
 
     private Rendered render(List<String> paragraphs) {
         Objects.requireNonNull(paragraphs, "paragraphs");
-        List<Page> pages = new TextLayout(font.shaper(), style).paginate(paragraphs);
+        List<DocumentPart> parts = paragraphs.stream().<DocumentPart>map(DocumentPart.Paragraph::new).toList();
+        return renderParts(parts);
+    }
+
+    private Rendered renderDocument(Document document) {
+        Objects.requireNonNull(document, "document");
+        return renderParts(document.parts());
+    }
+
+    private Rendered renderParts(List<DocumentPart> parts) {
+        List<Page> pages = new TextLayout(font.shaper(), style).paginate(parts);
         byte[] bytes = new PdfDocumentBuilder(font.bytes(), font.metrics(), style, info).write(pages);
         return new Rendered(bytes, pages.size());
     }
