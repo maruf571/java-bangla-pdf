@@ -23,6 +23,9 @@ try (BanglaPdfService pdf = BanglaPdfService.withBundledFont()) {
 - [Quick start](#quick-start)
 - [Using the service](#using-the-service)
 - [Why Bangla is hard](#why-bangla-is-hard)
+- [Why not just PDFBox?](#why-not-just-pdfbox)
+- [What else could you use?](#what-else-could-you-use)
+- [Three problems, not one](#three-problems-not-one)
 - [How it renders perfect Bangla](#how-it-renders-perfect-bangla)
 - [Why the viewer cannot get it wrong](#why-the-viewer-cannot-get-it-wrong)
 - [Why the text is still real text](#why-the-text-is-still-real-text)
@@ -91,6 +94,24 @@ try (BanglaPdfService pdf = BanglaPdfService.withBundledFont()) {
 }
 ```
 
+For a document that needs a real table — an invoice's line items, a price list —
+hand `write` a `Document` of `DocumentPart`s instead of paragraphs (with
+`DocumentPart.Column`, `.Paragraph` and `.Table` imported):
+
+```java
+Table items = new Table(
+        List.of(Column.left("বিবরণ", 205), Column.right("মোট", 115)),
+        List.of(List.of("হাতে তৈরি নোটবুক", "৳৬০০.০০")));
+
+pdf.write(Document.of(new Paragraph("নীল আকাশ ট্রেডার্স"), items),
+          Path.of("invoice.pdf"));
+```
+
+Columns are fixed-width with per-column alignment; a cell that does not fit
+wraps like a narrow paragraph, and a row is never split across a page break.
+Cells are shaped exactly like prose, so a long item name still breaks at cluster
+boundaries rather than mid-conjunct. `InvoiceExample` is a full worked example.
+
 `write` returns the page count. A different font is one call away —
 `BanglaPdfService.withFont(Path.of("MyBangla.ttf"))` — as long as it has
 TrueType (`glyf`) outlines.
@@ -110,6 +131,12 @@ well below the baseline, so lines set at Latin leading collide.
 ---
 
 ## Why Bangla is hard
+
+Encoding and shaping are different questions. Encoding asks "which byte stands
+for this character?" Shaping asks "which glyphs, in what order, at what
+positions, actually draw this text?" For Latin the two nearly coincide — the
+five characters of `Hello` are five glyphs, in the same order, none of them
+moved — so skipping shaping costs you slightly loose spacing, not legibility.
 
 Bangla is an *abugida*, and almost nothing about it is one-character-one-glyph.
 Three things go wrong the moment you assume otherwise. These are real numbers,
@@ -138,6 +165,113 @@ output.
 Draw the code points in the order they were typed and you get কি as "িক" and
 ক্ষ as three separate letters with a visible hasant between them. It is not
 subtly wrong, it is unreadable.
+
+## Why not just PDFBox?
+
+A fair question, and the answer changed recently — the blanket claim that
+"PDFBox cannot render Bangla" is now out of date.
+
+**PDFBox 2.x cannot.** `PDPageContentStream.showText(String)` re-encodes its
+argument through the font's `cmap`, one character at a time. `cmap` is a
+character-to-glyph table: it knows `ক` is glyph `0x0014`, and that is genuinely
+all it knows. It has no entry for "`ক` followed by hasant followed by `ষ`",
+because conjuncts live in `GSUB`. So you get one glyph per code point, in typing
+order, unsubstituted and unreordered — every failure in the table above. FontBox
+2.0.x ships only `LookupTypeSingleSubstFormat1/2`: single substitution, no
+ligature lookups, no conjuncts. This project pins 2.0.24.
+
+**PDFBox 3.x partly can.** Bengali and Latin ligature support landed in 3.0.0,
+Devanagari and Gujarati in 3.0.2. FontBox 3.x ships a real
+`GsubWorkerForBengali` that applies the Indic feature set in order — `locl`,
+`nukt`, `akhn`, `rphf`, `blwf`, `half`, `pstf`, `vatu`, `cjct`, `init`, `pres`,
+`abvs`, `blws`, `psts`, `haln`, `calt` — and repositions pre-base matras and
+two-part vowels. It is wired into the ordinary API, so plain `showText` shapes:
+
+```text
+showText → showTextInternal → encodeForGsub → applyGSUBRules → GsubWorker.applyTransforms
+```
+
+What it still does not do:
+
+| Gap | Consequence |
+|---|---|
+| No `GPOS` at all — PDFBox's own FAQ says so, and there is not one positioning class in the jar | Marks sit on their default advances; nothing places the ু under its consonant or the ঁ over it |
+| Not all `GSUB` table formats are supported | Coverage depends on the font; some conjuncts quietly fail to form |
+| Reordering driven by hardcoded character lists (`BEFORE_HALF_CHARS`, `BEFORE_AND_AFTER_SPAN_CHARS`) | Not the general Indic reordering algorithm |
+| One script per font | No mixed-script shaping |
+
+`GSUB` decides *which* glyphs; `GPOS` decides *where they go*. PDFBox does the
+first and not the second — which is why [Positioning marks](#positioning-marks)
+below has no PDFBox equivalent.
+
+A more complete path is on the way: the PDFBox 3.0 FAQ documents an AWT-based
+layout that uses HarfBuzz underneath — via the JDK, whose font layout has used
+HarfBuzz since JDK 9 — as an opt-in `pdfbox-layout-awt` artifact, "starting with
+3.0.9". As of September 2026 that is unreleased: the newest release is 3.0.8,
+and neither 3.0.9 nor `pdfbox-layout-awt` is on Maven Central.
+
+Calling HarfBuzz directly gets `GSUB` *and* `GPOS`, the full reordering
+algorithm, and mixed-script runs, today. It also makes the question moot: since
+PDFBox's text path is never used here, its shaping support — present or absent,
+2.x or 3.x — cannot affect the output.
+
+## What else could you use?
+
+If the requirement is all five of — free, in-process Java, no headless browser,
+correct Bangla, and text that stays selectable and searchable — the field is
+thin. Every free alternative fails at least one of them:
+
+| Option | Free | No browser | Correct Bangla | Text stays real |
+|---|---|---|---|---|
+| iText 7 + pdfCalligraph | ✗ paid add-on | ✓ | ✓ | ✓ |
+| Apache FOP | ✓ | ✓ | ✗ Bengali `none` | — |
+| PDFBox 3.x built-in `GSUB` | ✓ | ✓ | partial — no `GPOS` | untested |
+| PDFBox 3.0.9 + `pdfbox-layout-awt` | ✓ | ✓ | likely | unreleased |
+| AWT shaping + `pdfbox-graphics2d` | ✓ | ✓ | ✓ | ✗ vectorised |
+| LibreOffice `--headless` | ✓ | ✓ | ✓ | ✓ |
+| **This project** | ✓ | ✓ | ✓ | ✓ |
+
+That "untested" cell is literal: whether PDFBox 3.x's `GSUB` path emits usable
+`ToUnicode` and `ActualText` for substituted conjuncts has not been checked here.
+If it does, PDFBox 3.x alone becomes a reasonable choice for documents where
+mark positioning does not matter much.
+
+**Apache FOP** is the one that ought to work. It is Apache-2.0, pure Java, needs
+no browser, and implements both `GSUB` and `GPOS` for complex scripts. But its
+own [script support table](https://xmlgraphics.apache.org/fop/2.1/complexscripts.html)
+lists Bengali as `none` / `none` — no support, not tested — where Devanagari and
+Gujarati are at least "partial". It is ruled out on this particular script, not
+on capability.
+
+**AWT + [`pdfbox-graphics2d`](https://github.com/rototor/pdfbox-graphics2d)**
+looks like a shortcut, since the JDK's own `TextLayout` has shaped Bengali
+through HarfBuzz since JDK 9: shape with AWT, draw through the Graphics2D
+bridge, done. Except the bridge falls back to vectorised text whenever the text
+uses features its font mapping cannot handle, and vectorised text is not
+searchable or copyable. That solves problem 1 and breaks problem 3.
+
+**LibreOffice in headless mode** genuinely works — free, not a browser, and it
+shapes with HarfBuzz like everything else. It is simply not a library: a
+few-hundred-megabyte external process to shell out to, fed a generated ODT or
+DOCX. So this project is the only in-process *library* answer, not the only
+answer.
+
+None of which is free of cost. What buys `GPOS` and real text here is a native
+`libharfbuzz` dependency, JDK 22 or newer, no font subsetting, no bidi, and a
+service that is not thread-safe — see [Limitations](#limitations).
+
+## Three problems, not one
+
+Reaching for a shaping engine solves the first of these. It is easy to solve the
+second and discover the third far too late.
+
+| | Problem | Solved by |
+|---|---|---|
+| 1 | **Shaping** — which glyphs, in what order, positioned where | HarfBuzz, called directly |
+| 2 | **Writing arbitrary glyph ids into a PDF** — shaping returns glyph ids, and there is no "shaped string" to hand back to `showText` | `/Identity-H` plus hand-written text operators |
+| 3 | **Keeping it real text** — raw glyph ids are private to one font, so the file becomes a picture of words | `ToUnicode` and `ActualText` |
+
+The next three sections take them in that order.
 
 ## How it renders perfect Bangla
 
@@ -324,6 +458,8 @@ nothing drifts along a line.
 ```
 BanglaPdfService     the entire public API; everything below is package-private
 PdfStyle             page geometry and typography, immutable
+Document             an ordered sequence of DocumentParts, laid out together
+DocumentPart         a Paragraph, or a Table of fixed-width aligned columns
 BanglaPdfException   the one failure type callers see
 
 TextShaper           script segmentation, HarfBuzz shaping, cluster mapping
@@ -333,7 +469,8 @@ TextLayout           line breaking and pagination on shaped widths
 ContentStreamBuilder glyphs to PDF text-showing operators: TJ, Ts, ActualText spans
 PdfDocumentBuilder   hands pages to PDFBox: font embedding, catalog, pages, metadata
 PdfSyntax            PDF operand formatting for the hand-written operators above
-Main                 demo
+Main                 demo: shaping showcase
+InvoiceExample       demo: an invoice with line-item tables
 ```
 
 Everything from `PdfDocumentBuilder` down to actual bytes on disk — object
@@ -355,7 +492,8 @@ this project re-implements that any more; see the note at the top of
   font check detects them and says so rather than producing a broken file.
 - **No bidi reordering.** Runs are placed left to right. Mixed Bangla and Latin
   is fine; mixing in a right-to-left script is not.
-- **Left-aligned only.** No justification, centring, tables or images.
+- **No justification, centring or images.** Prose is left-aligned; table cells
+  can be left- or right-aligned per column.
 - **One font per document.** No automatic fallback for characters the font
   lacks — `unsupportedCharacters` tells you about them instead.
 - **Not thread-safe.** One service per thread; they are cheap.
