@@ -1,4 +1,4 @@
-# bangla-pdf
+# java-bangla-pdf
 
 Renders correctly shaped Bangla (Bengali) text to PDF from Java. Shaping —
 the part that decides whether Bangla looks right — is not delegated to any
