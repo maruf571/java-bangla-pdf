@@ -9,20 +9,39 @@
   <version>1.0.0</version>
   <packaging>jar</packaging>
   <name>bangla-pdf</name>
-  <description>Renders correctly shaped Bangla text to PDF with no PDF library and no shaping library.</description>
+  <description>Renders correctly shaped Bangla text to PDF, shaped by HarfBuzz and assembled by PDFBox.</description>
 
   <!--
-    There are deliberately no dependencies. HarfBuzz is called as a native
-    shared library through the JDK's Foreign Function and Memory API
-    (java.lang.foreign), which is final as of Java 22, and the PDF file is
-    assembled byte by byte. See README.md.
+    Shaping is not delegated to any library: HarfBuzz is called directly as a
+    native shared library through the JDK's Foreign Function and Memory API
+    (java.lang.foreign, final as of Java 22). That step decides every glyph id
+    and position and is what makes the Bangla correct.
+
+    Turning those glyphs into a PDF file, however, is exactly the kind of
+    well-trodden, unglamorous bookkeeping a library should own: object
+    numbering, cross-reference tables, stream compression, font-descriptor
+    dictionaries, so that part is delegated to Apache PDFBox. This project
+    still writes the actual text-showing operators by hand (see
+    ContentStreamBuilder): PDFBox's normal text API always re-encodes a
+    String through the font's cmap, which is the naive path that breaks
+    Bangla, so the glyph ids HarfBuzz already chose are injected as raw
+    content-stream bytes instead. See README.md.
   -->
 
   <properties>
     <maven.compiler.release>22</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <exec.mainClass>com.example.banglapdf.Main</exec.mainClass>
+    <pdfbox.version>2.0.24</pdfbox.version>
   </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>${pdfbox.version}</version>
+    </dependency>
+  </dependencies>
 
   <build>
     <finalName>bangla-pdf</finalName>
@@ -68,6 +87,34 @@
             </manifestEntries>
           </archive>
         </configuration>
+      </plugin>
+
+      <!--
+        PDFBox pulls in FontBox and commons-logging, so `java -jar` needs
+        those on the classpath too. Shading bundles them into one runnable
+        jar under the same finalName, so the README's `java -jar
+        target/bangla-pdf.jar` keeps working unchanged.
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>${exec.mainClass}</mainClass>
+                  <manifestEntries>
+                    <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+                  </manifestEntries>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

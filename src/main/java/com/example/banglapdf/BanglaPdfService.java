@@ -9,7 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-import com.example.banglapdf.PdfDocumentWriter.DocumentInfo;
+import com.example.banglapdf.PdfDocumentBuilder.DocumentInfo;
 import com.example.banglapdf.TextLayout.Page;
 
 /**
@@ -21,11 +21,11 @@ import com.example.banglapdf.TextLayout.Page;
  * }
  * }</pre>
  *
- * <p>That is the whole API. Behind it, the text is shaped by HarfBuzz, wrapped
- * to the column, flowed onto pages, and written into a hand-assembled PDF with
- * the font embedded and a {@code ToUnicode} map so the result stays searchable.
- * No PDF library and no shaping library is involved; see {@code README.md} for
- * why each step is needed and what would break without it.
+ * <p>That is the whole API. Behind it, the text is shaped by HarfBuzz (not
+ * delegated to any library -- that is the step that makes the Bangla correct),
+ * wrapped to the column, flowed onto pages, and assembled into a PDF by Apache
+ * PDFBox with the font embedded and searchable, copyable text. See {@code
+ * README.md} for why each step is needed and what would break without it.
  *
  * <p>Style and metadata are set with {@code with...} methods, each returning a
  * new service that shares the same loaded font:
@@ -158,7 +158,7 @@ public final class BanglaPdfService implements AutoCloseable {
     private Rendered render(List<String> paragraphs) {
         Objects.requireNonNull(paragraphs, "paragraphs");
         List<Page> pages = new TextLayout(font.shaper(), style).paginate(paragraphs);
-        byte[] bytes = new PdfDocumentWriter(font.metrics(), style, info).write(pages);
+        byte[] bytes = new PdfDocumentBuilder(font.bytes(), font.metrics(), style, info).write(pages);
         return new Rendered(bytes, pages.size());
     }
 
@@ -212,6 +212,11 @@ public final class BanglaPdfService implements AutoCloseable {
 
         TrueTypeFont metrics() {
             return metrics;
+        }
+
+        /** The original font bytes, handed to PDFBox for embedding on every render. */
+        byte[] bytes() {
+            return bytes;
         }
 
         TextShaper shaper() {

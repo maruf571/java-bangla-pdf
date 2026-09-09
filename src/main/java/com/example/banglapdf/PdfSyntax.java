@@ -3,7 +3,12 @@ package com.example.banglapdf;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
-/** Small helpers for writing the primitive value types of the PDF file format. */
+/**
+ * Small helpers for writing the primitive value types PDF content-stream
+ * operators use. PDFBox owns the surrounding file structure (see
+ * {@link PdfDocumentBuilder}); this is only for the bytes
+ * {@link ContentStreamBuilder} hands it through {@code appendRawCommands}.
+ */
 final class PdfSyntax {
 
     private PdfSyntax() {
@@ -33,28 +38,15 @@ final class PdfSyntax {
     /**
      * A PDF text string in hexadecimal UTF-16BE, with the byte-order mark that
      * tells a reader it is Unicode rather than PDFDocEncoding. Bangla cannot be
-     * expressed any other way in a PDF string.
+     * expressed any other way in a PDF string, which is what an
+     * {@code ActualText} value is.
      */
     static String unicodeString(String text) {
-        return utf16Hex(text, true);
-    }
-
-    /** UTF-16BE hex without the BOM, as a bfchar destination wants it. */
-    static String unicodeCodes(String text) {
-        return utf16Hex(text, false);
-    }
-
-    private static String utf16Hex(String text, boolean byteOrderMark) {
         StringBuilder hex = new StringBuilder(text.length() * 4 + 6);
-        hex.append('<').append(byteOrderMark ? "FEFF" : "");
+        hex.append("<FEFF");
         for (byte b : text.getBytes(StandardCharsets.UTF_16BE)) {
             hex.append(String.format("%02X", b));
         }
         return hex.append('>').toString();
-    }
-
-    /** ASCII-encodes PDF syntax. Stream payloads are written as raw bytes instead. */
-    static byte[] ascii(String text) {
-        return text.getBytes(StandardCharsets.ISO_8859_1);
     }
 }

@@ -9,43 +9,50 @@ import com.example.banglapdf.TextShaper.ShapedGlyph;
 import com.example.banglapdf.TextShaper.ShapedText;
 
 /**
- * Writes a page's shaped glyphs as a PDF content stream.
+ * Writes a page's shaped glyphs as PDF text-showing operators.
  *
- * <p>Three details do the real work here:
+ * <p>This is deliberately not done through PDFBox's own text API. {@code
+ * PDPageContentStream.showText(String)} re-encodes its argument through the
+ * font's cmap, character by character -- exactly the naive, unshaped path this
+ * project exists to avoid. So {@link PdfDocumentBuilder} opens the page's text
+ * object and selects the font through PDFBox as normal, then hands the byte
+ * sequence built here to {@code appendRawCommands}, which writes it verbatim.
+ * Everything downstream of {@link TextShaper} already knows the exact glyph
+ * ids and positions; nothing here re-derives them.
+ *
+ * <p>Three details do the real work:
  *
  * <ul>
- *   <li><b>Identity-H codes.</b> Each glyph is emitted as its two-byte glyph
- *       id. Nothing in the file asks the viewer to map characters to glyphs,
- *       so the viewer cannot get Bangla wrong -- the decision was already made
- *       by the shaper.
+ *   <li><b>Identity-H codes.</b> Each glyph is emitted as its own two-byte
+ *       glyph id. Nothing in the file asks the viewer to map characters to
+ *       glyphs, so the viewer cannot get Bangla wrong -- the decision was
+ *       already made by the shaper.
  *   <li><b>TJ adjustments and Ts.</b> HarfBuzz positions marks with a
  *       horizontal and vertical offset. The horizontal part is folded into the
  *       kerning numbers of a {@code TJ} array, and the vertical part becomes a
  *       text rise ({@code Ts}), so a whole line is usually one operator.
- *   <li><b>ActualText.</b> Any word whose glyphs do not correspond one-to-one
- *       with the characters they came from -- which in Bangla is most words --
- *       is wrapped in a marked-content span carrying the original characters,
- *       in their original order.
+ *   <li><b>ActualText.</b> Any word whose glyphs do not map one-to-one onto
+ *       its characters -- which in Bangla is most words -- is wrapped in a
+ *       marked-content span carrying the original characters, in their
+ *       original order. (Per-glyph {@code ToUnicode} is PDFBox's job: with the
+ *       font embedded unsubset, it builds one from the font's own cmap for
+ *       every glyph that maps to a character on its own; ActualText covers
+ *       what that cannot -- the drawing order.)
  * </ul>
  */
 final class ContentStreamBuilder {
 
     private final TrueTypeFont font;
     private final PdfStyle style;
-    private final String fontResource;
-    private final GlyphUsage usage;
 
-    ContentStreamBuilder(TrueTypeFont font, PdfStyle style, String fontResource, GlyphUsage usage) {
+    ContentStreamBuilder(TrueTypeFont font, PdfStyle style) {
         this.font = font;
         this.style = style;
-        this.fontResource = fontResource;
-        this.usage = usage;
     }
 
-    byte[] build(Page page) {
+    /** The text-showing operators for one page, to run inside PDFBox's BT/Tf/ET. */
+    String build(Page page) {
         StringBuilder out = new StringBuilder(4096);
-        out.append("BT\n/").append(fontResource).append(' ')
-                .append(PdfSyntax.number(style.fontSize())).append(" Tf\n");
         for (Line line : page.lines()) {
             if (line.text().isEmpty()) {
                 continue;
@@ -56,8 +63,7 @@ final class ContentStreamBuilder {
                     .append(PdfSyntax.number(line.baseline())).append(" Tm\n");
             appendLine(out, line.text());
         }
-        out.append("ET\n");
-        return PdfSyntax.ascii(out.toString());
+        return out.toString();
     }
 
     private void appendLine(StringBuilder out, ShapedText text) {
@@ -103,15 +109,8 @@ final class ContentStreamBuilder {
     private void appendClusters(GlyphRun run, ShapedText text, int from, int to) {
         for (int c = from; c < to; c++) {
             Cluster cluster = text.clusters().get(c);
-            String source = text.textOf(cluster);
             for (int i = 0; i < cluster.glyphCount(); i++) {
-                ShapedGlyph glyph = text.glyphs().get(cluster.firstGlyph() + i);
-                // The font's own character map is authoritative where it has an
-                // answer; the cluster's text is the fallback for glyphs that
-                // exist only as the product of a substitution.
-                String canonical = font.unicodeForGlyph(glyph.glyphId());
-                usage.record(glyph.glyphId(), canonical != null ? canonical : (i == 0 ? source : null));
-                run.append(glyph);
+                run.append(text.glyphs().get(cluster.firstGlyph() + i));
             }
         }
     }

@@ -1,8 +1,11 @@
 # bangla-pdf
 
-Renders correctly shaped Bangla (Bengali) text to PDF from Java, with **no PDF
-library and no shaping library** — no iText, no PDFBox, no Apache FOP, and no
-headless browser doing the typesetting behind your back.
+Renders correctly shaped Bangla (Bengali) text to PDF from Java. Shaping —
+the part that decides whether Bangla looks right — is not delegated to any
+library: HarfBuzz is called directly, and no headless browser is doing the
+typesetting behind your back. Turning the shaped glyphs into an actual PDF
+file, which is ordinary, well-understood bookkeeping, is delegated to Apache
+PDFBox.
 
 The text comes out looking right, and it comes out selectable, searchable and
 copyable. Those are two different problems, and this project solves both.
@@ -39,6 +42,7 @@ try (BanglaPdfService pdf = BanglaPdfService.withBundledFont()) {
 |---|---|
 | JDK 22 or newer | The Foreign Function &amp; Memory API (`java.lang.foreign`) is final as of 22 |
 | libharfbuzz | `brew install harfbuzz` · `sudo apt install libharfbuzz0b` · `sudo dnf install harfbuzz` |
+| Apache PDFBox | Pulled in by Maven (`org.apache.pdfbox:pdfbox`); no separate install |
 
 ```bash
 mvn compile exec:exec              # writes bangla-output.pdf
@@ -50,6 +54,12 @@ java -jar target/bangla-pdf.jar report.pdf
 
 `mvn exec:java` also works, but runs inside Maven's own JVM and cannot be given
 `--enable-native-access`, so it prints a warning. `exec:exec` forks a clean JVM.
+
+`mvn package` shades PDFBox, FontBox and their one transitive dependency
+(commons-logging) into `target/bangla-pdf.jar`, so that one file — a few
+megabytes, mostly PDFBox — runs with plain `java -jar`. HarfBuzz stays a
+runtime requirement regardless, since it is loaded as a native library, not a
+jar.
 
 A Bangla font (Noto Sans Bengali) is bundled on the classpath, so there is
 nothing else to install.
@@ -184,12 +194,19 @@ boundaries, so a cut never lands inside ক্ষ and leaves a dangling hasant.
 **4 — Emit glyph ids.** `ContentStreamBuilder` writes each glyph as its raw
 two-byte glyph id.
 
-**5 — Embed and annotate.** `PdfDocumentWriter` embeds the font byte-for-byte
-and attaches the tables that let the text be read back as text.
+**5 — Embed and annotate.** `PdfDocumentBuilder` hands the font bytes and the
+content stream to PDFBox, which embeds the font byte-for-byte and builds the
+tables that let the text be read back as text. PDFBox is not shown the *string*
+"কর্ম" anywhere in this step — only the glyph ids and the font. Its normal API
+for drawing text always re-encodes a `String` through the font's own cmap,
+which is precisely the unshaped path that gets Bangla wrong, so it is never
+called; see the note in `ContentStreamBuilder`.
 
 ## Why the viewer cannot get it wrong
 
-Steps 4 and 5 rest on three PDF choices that stack into a single guarantee:
+Steps 4 and 5 rest on three choices, configured by loading the font into
+PDFBox with `PDType0Font.load(document, fontBytes, false)`, that stack into a
+single guarantee:
 
 | Choice | Effect |
 |---|---|
@@ -217,15 +234,27 @@ anyone else.
 Two tables fix that, and they are layered because each covers what the other
 cannot.
 
-**`ToUnicode`, built from the font's own cmap.** This is the per-glyph
-dictionary. The obvious way to build it — "give each glyph the text of whichever
-cluster used it first" — is subtly broken: the ক glyph first seen inside কা would
-be recorded as "কা", and every bare ক in the document would then copy as "কা".
-So the map is built by reading the font's own character map *backwards*, which
-gives every glyph that exists because a character was typed its own unambiguous
-answer. Only glyphs that exist purely as the output of a substitution — the
-conjuncts, which no single character maps to — fall back to the shaper's cluster
-text. See `TrueTypeFont.unicodeForGlyph`.
+**`ToUnicode`, built by PDFBox from the font's own cmap.** This is the
+per-glyph dictionary. The obvious way to build it — "give each glyph the text
+of whichever cluster used it first" — is subtly broken: the ক glyph first seen
+inside কা would be recorded as "কা", and every bare ক in the document would
+then copy as "কা".
+
+PDFBox does not make that mistake, and does not need to be told anything to
+avoid it. Loading the font with `PDType0Font.load(document, fontBytes, false)`
+— `false` meaning *embed the whole font, not a PDFBox-computed subset* — makes
+it walk every glyph id in the font, look up that glyph's own character in the
+font's cmap, and write `ToUnicode` from that: every glyph that exists because a
+character was typed gets its own unambiguous answer, for the entire font, not
+just the glyphs one document happens to draw. Only glyphs that exist purely as
+the output of a substitution — the conjuncts, which no single character maps to
+— have no entry at all, and fall through to the `ActualText` span below
+instead. This project used to build that table itself, the same way, by
+reading the font's cmap backwards, until PDFBox's own font embedder was found
+to do exactly that already. `embedSubset = false` is the one flag this whole
+guarantee rests on: `true` would subset the font down to whatever a normal
+`showText` call used, which is never called here, so nothing would end up
+embedded at all.
 
 **`ActualText` spans, for order.** A per-glyph dictionary still cannot express
 কি: the glyphs are drawn ি-then-ক, and reading them off in visual order gives
@@ -284,9 +313,11 @@ nothing drifts along a line.
 - Greedy first-fit wrapping on shaped widths, with cluster-safe breaking for
   words wider than the column.
 - Automatic pagination.
-- `/W` declares a width for every glyph the document draws and no others — 111
-  entries for the demo page, not the font's full glyph set.
-- All streams are Flate-compressed. The demo is an 82 KB PDF carrying a 164 KB font.
+- `/W` declares a width for every glyph in the font, not just the ones a given
+  document draws — PDFBox builds it once, at embedding time, before it knows
+  which glyphs `ContentStreamBuilder` will go on to use.
+- All streams are Flate-compressed. The demo is an 88 KB PDF carrying a 168 KB
+  font plus the widths and ToUnicode entries for its whole ~1,400-glyph set.
 
 ## Project layout
 
@@ -297,23 +328,31 @@ BanglaPdfException   the one failure type callers see
 
 TextShaper           script segmentation, HarfBuzz shaping, cluster mapping
 HarfBuzzLibrary      raw FFM binding to libharfbuzz
-TrueTypeFont         head/maxp/hhea/hmtx/post/name/cmap; never touches outlines
+TrueTypeFont         unitsPerEm + glyph widths, via FontBox; never touches outlines
 TextLayout           line breaking and pagination on shaped widths
-ContentStreamBuilder glyphs to PDF operators: TJ, Ts, ActualText spans
-GlyphUsage           which glyphs are drawn, and what text they stand for
-ToUnicodeCMap        the glyph-to-Unicode table
-PdfDocumentWriter    catalog, page tree, Type0/CIDFontType2 font, metadata
-PdfObjectWriter      indirect objects, Flate streams, xref, trailer
-PdfSyntax            PDF primitive value formatting
+ContentStreamBuilder glyphs to PDF text-showing operators: TJ, Ts, ActualText spans
+PdfDocumentBuilder   hands pages to PDFBox: font embedding, catalog, pages, metadata
+PdfSyntax            PDF operand formatting for the hand-written operators above
 Main                 demo
 ```
 
+Everything from `PdfDocumentBuilder` down to actual bytes on disk — object
+numbering, the cross-reference table, stream compression, the
+`CIDFontType2`/`FontDescriptor` dictionaries — is Apache PDFBox. Nothing in
+this project re-implements that any more; see the note at the top of
+`pom.xml` for exactly where the line is drawn between "shape it ourselves" and
+"let a library assemble the file."
+
 ## Limitations
 
-- **No subsetting.** The whole font is embedded. Correct and simple, but a
-  larger file than it needs to be — compression takes most of the sting out.
+- **No subsetting.** The whole font is embedded, deliberately: PDFBox's
+  subsetting is driven by tracking which characters pass through its normal
+  `showText`/`encode` path, and that path is never called here (see
+  [Why the viewer cannot get it wrong](#why-the-viewer-cannot-get-it-wrong)) —
+  so subsetting would need this project to tell PDFBox which glyphs were used
+  by some other means. Compression takes most of the sting out in the meantime.
 - **TrueType outlines only.** CFF/`OTTO` fonts would need `FontFile3`; the
-  parser detects them and says so rather than producing a broken file.
+  font check detects them and says so rather than producing a broken file.
 - **No bidi reordering.** Runs are placed left to right. Mixed Bangla and Latin
   is fine; mixing in a right-to-left script is not.
 - **Left-aligned only.** No justification, centring, tables or images.
@@ -331,6 +370,10 @@ or set `HARFBUZZ_LIB` to the full path of the shared library.
 
 **Warning about restricted native access** — you ran `exec:java`. Use
 `mvn compile exec:exec`, or add `--enable-native-access=ALL-UNNAMED` yourself.
+
+**Maven can't resolve `org.apache.pdfbox:pdfbox`** — the build needs network
+access the first time, to download PDFBox, FontBox and commons-logging into
+your local repository. After that, `mvn -o` (offline) works.
 
 **Conjuncts come out as separate letters with visible hasants** — the font has
 no Bangla `GSUB` table. Check you are not passing a Latin-only font to
